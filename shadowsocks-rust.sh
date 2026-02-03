@@ -1,13 +1,19 @@
 #!/bin/bash
 set -e
 
-App_dir="/opt/shadowsocks"
+APP_NAME="shadowsocks-rust"
+App_dir="/opt/$APP_NAME"
 mkdir -p "$App_dir"
 
-SYSTEMD_SERVICE="/etc/systemd/system/shadowsocks.service"
-SYSTEMD_UPGRADE_SERVICE="/etc/systemd/system/shadowsocks-upgrade.service"
-SYSTEMD_UPGRADE_TIMER="/etc/systemd/system/shadowsocks-upgrade.timer"
-SYSTEMD_RESTART_TIMER="/etc/systemd/system/shadowsocks-restart.timer"
+# Copy script to app directory so it can be referenced by systemd services
+cp "$0" "$App_dir/$APP_NAME.sh"
+chmod +x "$App_dir/$APP_NAME.sh"
+
+SYSTEMD_SERVICE="/etc/systemd/system/${APP_NAME}.service"
+SYSTEMD_UPGRADE_SERVICE="/etc/systemd/system/${APP_NAME}-upgrade.service"
+SYSTEMD_UPGRADE_TIMER="/etc/systemd/system/${APP_NAME}-upgrade.timer"
+SYSTEMD_RESTART_SERVICE="/etc/systemd/system/${APP_NAME}-restart.service"
+SYSTEMD_RESTART_TIMER="/etc/systemd/system/${APP_NAME}-restart.timer"
 
 check_system() {
     echo "Checking system..."
@@ -69,13 +75,7 @@ get_latest_version() {
 }
 
 download_latest() {
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64|amd64) ARCH="x86_64" ;;
-        aarch64|arm64) ARCH="aarch64" ;;
-        armv7l|armhf) ARCH="armv7" ;;
-    esac
-
+    # Use the previously determined ARCH variable
     URL=$(curl -s https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest \
         | jq -r ".assets[] | select(.name | test(\"$ARCH-unknown-linux-gnu.tar.xz$\")) | .browser_download_url")
 
@@ -89,8 +89,10 @@ install_ss() {
     download_latest
 
     install -m 755 /tmp/ssserver "$App_dir/ssserver"
-
-    cat > "$App_dir/config.json" <<EOF
+    
+    # Create default config if it doesn't exist
+    if [ ! -f "$App_dir/config.json" ]; then
+        cat > "$App_dir/config.json" <<EOF
 {
     "server": "::",
     "server_port": 20443,
@@ -99,15 +101,18 @@ install_ss() {
     "mode": "tcp_only"
 }
 EOF
+    fi
 
-    cat > "$App_dir/shadowsocks.service" <<EOF
+    cat > "$App_dir/${APP_NAME}.service" <<EOF
 [Unit]
-Description=Shadowsocks-Rust Server
+Description=${APP_NAME} Server
 After=network.target
 
 [Service]
+Type=simple
 ExecStart=$App_dir/ssserver -c $App_dir/config.json
-Restart=on-failure
+Restart=always
+RestartSec=3
 User=nobody
 Group=nogroup
 LimitNOFILE=32768
@@ -116,22 +121,35 @@ LimitNOFILE=32768
 WantedBy=multi-user.target
 EOF
 
-    ln -sf "$App_dir/shadowsocks.service" "$SYSTEMD_SERVICE"
+    ln -sf "$App_dir/${APP_NAME}.service" "$SYSTEMD_SERVICE"
 
-    cat > "$App_dir/shadowsocks-upgrade.service" <<EOF
+    cat > "$App_dir/${APP_NAME}-upgrade.service" <<EOF
 [Unit]
-Description=Upgrade Shadowsocks-Rust
+Description=Upgrade ${APP_NAME}
 
 [Service]
 Type=oneshot
-ExecStart=$App_dir/shadowsocks-rust.sh -up
+ExecStart=/bin/bash -c '$App_dir/$APP_NAME.sh -up'
+RemainAfterExit=yes
 EOF
 
-    ln -sf "$App_dir/shadowsocks-upgrade.service" "$SYSTEMD_UPGRADE_SERVICE"
+    ln -sf "$App_dir/${APP_NAME}-upgrade.service" "$SYSTEMD_UPGRADE_SERVICE"
 
-    cat > "$SYSTEMD_UPGRADE_TIMER" <<EOF
+    cat > "$App_dir/${APP_NAME}-restart.service" <<EOF
 [Unit]
-Description=Monthly upgrade for Shadowsocks-Rust
+Description=Restart ${APP_NAME}
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'systemctl restart $APP_NAME'
+RemainAfterExit=yes
+EOF
+
+    ln -sf "$App_dir/${APP_NAME}-restart.service" "$SYSTEMD_RESTART_SERVICE"
+
+    cat > "$App_dir/${APP_NAME}-upgrade.timer" <<EOF
+[Unit]
+Description=Monthly upgrade for ${APP_NAME}
 
 [Timer]
 OnCalendar=monthly
@@ -141,9 +159,11 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-    cat > "$SYSTEMD_RESTART_TIMER" <<EOF
+    ln -sf "$App_dir/${APP_NAME}-upgrade.timer" "$SYSTEMD_UPGRADE_TIMER"
+
+    cat > "$App_dir/${APP_NAME}-restart.timer" <<EOF
 [Unit]
-Description=Weekly restart of Shadowsocks service
+Description=Weekly restart of ${APP_NAME}
 
 [Timer]
 OnCalendar=weekly
@@ -153,10 +173,12 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
+    ln -sf "$App_dir/${APP_NAME}-restart.timer" "$SYSTEMD_RESTART_TIMER"
+
     systemctl daemon-reload
-    systemctl enable --now shadowsocks
-    systemctl enable --now shadowsocks-upgrade.timer
-    systemctl enable --now shadowsocks-restart.timer
+    systemctl enable --now ${APP_NAME}.service
+    systemctl enable --now ${APP_NAME}-upgrade.timer
+    systemctl enable --now ${APP_NAME}-restart.timer
 }
 
 upgrade_ss() {
@@ -171,15 +193,21 @@ upgrade_ss() {
     fi
 
     download_latest
-    systemctl stop shadowsocks
+    systemctl stop $APP_NAME
     install -m 755 /tmp/ssserver "$App_dir/ssserver"
-    systemctl start shadowsocks
+    systemctl start $APP_NAME
 }
 
 update_conf_from_url() {
     url="$1"
     curl -L "$url" -o "$App_dir/config.json"
-    systemctl restart shadowsocks
+    systemctl restart $APP_NAME
+}
+
+update_conf_from_file() {
+    conf_file="$1"
+    cp "$conf_file" "$App_dir/config.json"
+    systemctl restart $APP_NAME
 }
 
 case "$1" in
@@ -188,6 +216,18 @@ case "$1" in
         ;;
     -http://*|-https://*)
         update_conf_from_url "${1#-}"
+        ;;
+    -config)
+        if [ -n "$2" ]; then
+            if [[ "$2" == http://* || "$2" == https://* ]]; then
+                update_conf_from_url "$2"
+            else
+                update_conf_from_file "$2"
+            fi
+        else
+            echo "Error: No configuration file specified with -config"
+            exit 1
+        fi
         ;;
     *)
         install_ss
