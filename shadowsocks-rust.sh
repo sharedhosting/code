@@ -219,11 +219,7 @@ case "$1" in
         ;;
     -config)
         if [ -n "$2" ]; then
-            if [[ "$2" == http://* || "$2" == https://* ]]; then
-                update_conf_from_url "$2"
-            else
-                update_conf_from_file "$2"
-            fi
+            update_conf_from_file "$2"
         else
             echo "Error: No configuration file specified with -config"
             exit 1
