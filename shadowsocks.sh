@@ -113,8 +113,10 @@ Type=simple
 ExecStart=$App_dir/ssserver -c $App_dir/config.json
 Restart=always
 RestartSec=3
-User=nobody
-Group=nogroup
+DynamicUser=yes
+# useradd -r -s /usr/sbin/nologin shadowsocks
+# User=${APP_NAME}   
+# Group=${APP_NAME}
 LimitNOFILE=32768
 
 [Install]
@@ -153,6 +155,7 @@ Description=Monthly upgrade for ${APP_NAME}
 
 [Timer]
 OnCalendar=monthly
+Unit=s${APP_NAME}-upgrade.service 
 Persistent=true
 
 [Install]
@@ -167,6 +170,7 @@ Description=Weekly restart of ${APP_NAME}
 
 [Timer]
 OnCalendar=weekly
+Unit=s${APP_NAME}-restart.service 
 Persistent=true
 
 [Install]
